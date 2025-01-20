@@ -147,7 +147,6 @@ class TextDataset(Dataset):
         self.total_tokens = 0
         
         # If stride is None, use non-overlapping windows for test/val
-        # For training, we can use overlapping windows with stride = max_length//2
         if stride is None:
             stride = max_length  # No overlap
         
@@ -166,6 +165,20 @@ class TextDataset(Dataset):
                     if len(chunk) == max_length:
                         self.encodings.append(chunk[:-1])
                         self.labels.append(chunk[1:])
+    
+    def __len__(self):
+        return len(self.encodings)
+    
+    def get_stats(self):
+        """Return statistics about the dataset"""
+        return {
+            'num_sequences': len(self.encodings),
+            'total_tokens': self.total_tokens,
+            'avg_tokens_per_seq': self.total_tokens / len(self.encodings) if self.encodings else 0
+        }
+        
+    def __getitem__(self, idx):
+        return torch.tensor(self.encodings[idx]), torch.tensor(self.labels[idx])           
 
 def load_data(batch_size=32, data_fraction=1.0):
     """Load and prepare data with specified fraction and token counting"""
