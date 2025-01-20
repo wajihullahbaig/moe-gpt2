@@ -1,2 +1,4 @@
 # moe-gpt2
-Simple architecture for GPT2 based MOE
+Simple architecture for based on Transformers architecture and GPT2 Tokenizer
+
+Training, testing and validation is done Wikipedia datasets. 
