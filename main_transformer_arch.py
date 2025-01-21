@@ -198,7 +198,7 @@ def load_data(batch_size=32, data_fraction=1.0):
         train_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH//2  # Overlapping for training
+        stride=CONTEXT_LENGTH  
     )
     
     # Validation and test should not have overlapping windows
@@ -206,13 +206,13 @@ def load_data(batch_size=32, data_fraction=1.0):
         val_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH  # No overlap
+        stride=CONTEXT_LENGTH//2
     )
     test_dataset = TextDataset(
         test_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH  # No overlap
+        stride=CONTEXT_LENGTH//2
     )
     
     # Print detailed statistics
@@ -272,7 +272,7 @@ class TransformerExpert(nn.Module):
         return x
 
 class UnGuidedMoETransformer(nn.Module):
-    def __init__(self, num_experts=NUM_EXPERTS):
+    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.2):
         super().__init__()
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
         if not hasattr(self, 'pos_encoding'):
@@ -282,6 +282,7 @@ class UnGuidedMoETransformer(nn.Module):
         self.router = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(),
+            nn.Dropout(dropout),  
             nn.Linear(HIDDEN_DIM, num_experts)
         )        
         
@@ -358,7 +359,7 @@ class UnGuidedMoETransformer(nn.Module):
         return logits
 
 class GuidedMoETransformer(nn.Module):
-    def __init__(self, num_experts=NUM_EXPERTS):
+    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.2):
         super().__init__()
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
         if not hasattr(self, 'pos_encoding'):
@@ -371,6 +372,7 @@ class GuidedMoETransformer(nn.Module):
         self.router = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(),
+            nn.Dropout(dropout),  
             nn.Linear(HIDDEN_DIM, num_experts)
         )
         

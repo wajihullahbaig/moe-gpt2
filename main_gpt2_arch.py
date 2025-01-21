@@ -200,7 +200,7 @@ def load_data(batch_size=32, data_fraction=1.0):
         train_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH//2  # Overlapping for training
+        stride=CONTEXT_LENGTH
     )
     
     # Validation and test should not have overlapping windows
@@ -208,13 +208,13 @@ def load_data(batch_size=32, data_fraction=1.0):
         val_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH  # No overlap
+        stride=CONTEXT_LENGTH//2
     )
     test_dataset = TextDataset(
         test_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH  # No overlap
+        stride=CONTEXT_LENGTH//2
     )
     
     # Print detailed statistics
@@ -749,13 +749,13 @@ def main():
     # Train unguided model
     print("Training Unguided MoE GPT2...")
     unguided_model = UnGuidedGPT2MoE().to(device)
-    print(f"\nTotal trainable parameters in UnGuided MoE: {count_parameters(unguided_model):,}")
+    print(f"\nTotal trainable parameters in UnGuided GPT2 MoE: {count_parameters(unguided_model):,}")
     train_model(unguided_model, train_loader, val_loader,num_epochs=50)
     
     # Train guided model
     print("\nTraining Guided MoE GPT2...")
     guided_model = GuidedGPT2MoE().to(device)
-    print(f"\nTotal trainable parameters in Guided MoE: {count_parameters(guided_model):,}")
+    print(f"\nTotal trainable parameters in Guided GPT 2 MoE: {count_parameters(guided_model):,}")
     train_model(guided_model, train_loader, val_loader,num_epochs=50)
 
     print("\nTesting Unguided Model Generation:")
