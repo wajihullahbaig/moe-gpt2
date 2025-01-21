@@ -1,8 +1,10 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2Tokenizer
+from transformers import GPT2Model, GPT2Config
 from datasets import load_dataset
 import numpy as np
 from typing import Dict, Optional
@@ -18,12 +20,12 @@ from datetime import datetime
 import os
 
 
-# Constants
-CONTEXT_LENGTH = 64
-VOCAB_SIZE = 50257  # GPT-2 vocabulary size
-NUM_EXPERTS = 10
-HIDDEN_DIM = 256
-NUM_HEADS = 16
+CONTEXT_LENGTH = 128
+VOCAB_SIZE = 50257  # GPT2 vocabulary size
+NUM_EXPERTS = 5
+HIDDEN_DIM = 128
+NUM_HEADS = 12
+NUM_LAYERS = 12
 
 def set_seed(seed: Optional[int] = 42):
     if seed is not None:
@@ -33,7 +35,7 @@ def set_seed(seed: Optional[int] = 42):
         torch.cuda.manual_seed_all(seed)
 
 
-def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'):
+def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots_gpt2'):
     """Visualize expert usage patterns"""
     model.eval()
     expert_usage = []
@@ -44,7 +46,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
             inputs = inputs.to(device)
             
             # Get expert weights based on model type
-            if isinstance(model, GuidedMoETransformer):
+            if isinstance(model, GuidedGPT2MoE):
                 # For guided model, get both learned and token-based weights
                 x = model.embedding(inputs)
                 # Get the correct slice of positional encoding
@@ -110,7 +112,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
     plt.subplot(2, 2, 4)
     specialization = np.zeros(NUM_EXPERTS)
     for expert_idx in range(NUM_EXPERTS):
-        if isinstance(model, GuidedMoETransformer):
+        if isinstance(model, GuidedGPT2MoE):
             # For guided model, compare with assigned vocabulary ranges
             assigned_tokens = model.expert_assignments[expert_idx]
             specialization[expert_idx] = np.mean(token_expert_map[assigned_tokens, expert_idx])
@@ -129,7 +131,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
     # Save plot
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_type = "guided" if isinstance(model, GuidedMoETransformer) else "unguided"
+    model_type = "guided" if isinstance(model, GuidedGPT2MoE) else "unguided"
     save_file = os.path.join(save_path, f'expert_viz_{model_type}_epoch{epoch}_{timestamp}.png')
     plt.savefig(save_file, dpi=200, bbox_inches='tight')
     plt.close()
@@ -248,61 +250,77 @@ def load_data(batch_size=32, data_fraction=1.0):
     
     return train_loader, val_loader, test_loader
 
-class TransformerExpert(nn.Module):
-    def __init__(self, d_model=HIDDEN_DIM, nhead=NUM_HEADS):
+
+
+class GPT2Expert(nn.Module):
+    def __init__(self, config=None):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead)
-        self.feed_forward = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),
-            nn.ReLU(),
-            nn.Linear(d_model * 4, d_model)
-        )
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        if config is None:
+            config = GPT2Config(
+                vocab_size=VOCAB_SIZE,
+                n_positions=CONTEXT_LENGTH,
+                n_embd=HIDDEN_DIM,
+                n_layer=NUM_LAYERS,
+                n_head=NUM_HEADS,
+                n_inner=None,
+                activation_function='gelu_new',
+                resid_pdrop=0.1,
+                embd_pdrop=0.1,
+                attn_pdrop=0.1,
+                layer_norm_epsilon=1e-5,
+                initializer_range=0.02,
+                bos_token_id=50256,
+                eos_token_id=50256,
+            )
+        self.gpt = GPT2Model(config)
         
     def forward(self, x):
-        # Self attention
-        attn_out, _ = self.self_attn(x, x, x)
-        x = self.norm1(x + attn_out)
-        
-        # Feed forward
-        ff_out = self.feed_forward(x)
-        x = self.norm2(x + ff_out)
-        return x
+        # GPT2 expects input_ids, but we're passing embeddings
+        # We need to get the hidden states from the GPT2 model
+        outputs = self.gpt(inputs_embeds=x)
+        return outputs.last_hidden_state
 
-class UnGuidedMoETransformer(nn.Module):
+class UnGuidedGPT2MoE(nn.Module):
     def __init__(self, num_experts=NUM_EXPERTS):
         super().__init__()
+        # Initialize GPT2 embedding layer
+        config = GPT2Config(
+            vocab_size=VOCAB_SIZE,
+            n_positions=CONTEXT_LENGTH,
+            n_embd=HIDDEN_DIM
+        )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
-        if not hasattr(self, 'pos_encoding'):
-            pos_encoding = torch.randn(1, CONTEXT_LENGTH, HIDDEN_DIM)
-            self.register_buffer('pos_encoding', pos_encoding)
+        
+        # Position encoding (from GPT2)
+        position = torch.arange(CONTEXT_LENGTH, dtype=torch.long)
+        div_term = torch.exp(torch.arange(0, HIDDEN_DIM, 2).float() * (-math.log(10000.0) / HIDDEN_DIM))
+        
+        pe = torch.zeros(1, CONTEXT_LENGTH, HIDDEN_DIM)
+        pe[0, :, 0::2] = torch.sin(position.unsqueeze(1) * div_term)
+        pe[0, :, 1::2] = torch.cos(position.unsqueeze(1) * div_term)
+        
+        self.register_buffer('pos_encoding', pe)
+        
         # Router network
         self.router = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(),
             nn.Linear(HIDDEN_DIM, num_experts)
-        )        
+        )
+        
+        # Initialize experts as GPT2 models
+        self.experts = nn.ModuleList([
+            GPT2Expert() for _ in range(num_experts)
+        ])
         
         # Output layer
         self.output = nn.Linear(HIDDEN_DIM, VOCAB_SIZE)
 
-    # Experts
-        self.experts = nn.ModuleList([
-            TransformerExpert() for _ in range(num_experts)
-        ])
-
-    def get_pos_encoding_slice(self, seq_length):
-        """Get the appropriate slice of positional encoding"""
-        return self.pos_encoding[:, :seq_length, :]                
-
     def calculate_diversity_loss(self, expert_outputs):
         """Calculate diversity loss between experts"""
-        # Flatten expert outputs for similarity calculation
         batch_size = expert_outputs.size(0)
         expert_outputs_flat = expert_outputs.view(batch_size, NUM_EXPERTS, -1)
         
-        # Calculate cosine similarity between expert outputs
         similarities = torch.matmul(
             expert_outputs_flat, 
             expert_outputs_flat.transpose(1, 2)
@@ -310,61 +328,66 @@ class UnGuidedMoETransformer(nn.Module):
         norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
         similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + 1e-8)
         
-        # We want to minimize similarity between different experts
         diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        return diversity_loss *0.35
+        return diversity_loss
         
     def forward(self, x, return_losses=False):
-        # x shape: [batch_size, seq_length]
-        
-        # Embedding + positional encoding
-        x = self.embedding(x)  # [batch_size, seq_length, hidden_dim]
-        pos_enc = self.get_pos_encoding_slice(x.size(1))
-        x = x + pos_enc
+        # Embedding
+        x = self.embedding(x)
         
         # Calculate routing weights
-        avg_hidden = x.mean(dim=1)  # [batch_size, hidden_dim]
-        routing_logits = self.router(avg_hidden)  # [batch_size, num_experts]
-        routing_weights = F.softmax(routing_logits, dim=-1)  # [batch_size, num_experts]
+        avg_hidden = x.mean(dim=1)
+        routing_logits = self.router(avg_hidden)
+        routing_weights = F.softmax(routing_logits, dim=-1)
         
         # Process through experts
         expert_outputs = []
         for expert in self.experts:
             expert_outputs.append(expert(x))
-        expert_outputs = torch.stack(expert_outputs, dim=1)  # [batch_size, num_experts, seq_length, hidden_dim]
+        expert_outputs = torch.stack(expert_outputs, dim=1)
         
-        # Fix: Reshape routing weights to match expert_outputs dimensions
-        routing_weights = routing_weights.unsqueeze(-1).unsqueeze(-1)  # [batch_size, num_experts, 1, 1]
+        # Reshape routing weights for multiplication
+        routing_weights = routing_weights.unsqueeze(-1).unsqueeze(-1)
         
         # Combine expert outputs
-        combined = torch.sum(expert_outputs * routing_weights, dim=1)  # [batch_size, seq_length, hidden_dim]
+        combined = torch.sum(expert_outputs * routing_weights, dim=1)
         
         # Generate output logits
         logits = self.output(combined)
         
         if return_losses and self.training:
-                # Load balancing loss
-                balance_loss = F.mse_loss(
-                    routing_weights.mean(0),
-                    torch.ones_like(routing_weights.mean(0)) / NUM_EXPERTS
-                ) *0.65
-                diversity_loss = self.calculate_diversity_loss(expert_outputs)
-                return logits, {
-                    'balance_loss': balance_loss,
-                    "diversity_loss":diversity_loss 
-                                }
+            # Load balancing loss
+            balance_loss = F.mse_loss(
+                routing_weights.mean(0),
+                torch.ones_like(routing_weights.mean(0)) / NUM_EXPERTS
+            )
+            diversity_loss = self.calculate_diversity_loss(expert_outputs)
+            return logits, {
+                'balance_loss': balance_loss,
+                'diversity_loss': diversity_loss
+            }
             
         return logits
 
-class GuidedMoETransformer(nn.Module):
+class GuidedGPT2MoE(nn.Module):
     def __init__(self, num_experts=NUM_EXPERTS):
         super().__init__()
+        # Initialize GPT2 embedding layer
+        config = GPT2Config(
+            vocab_size=VOCAB_SIZE,
+            n_positions=CONTEXT_LENGTH,
+            n_embd=HIDDEN_DIM
+        )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
-        if not hasattr(self, 'pos_encoding'):
-            pos_encoding = torch.randn(1, CONTEXT_LENGTH, HIDDEN_DIM)
-            self.register_buffer('pos_encoding', pos_encoding)
+        
         # Expert assignments based on token types
         self.expert_assignments = self.create_expert_assignments()
+        
+        # Position encoding (from GPT2)
+        self.register_buffer(
+            "pos_encoding",
+            torch.arange(0, CONTEXT_LENGTH).unsqueeze(0).expand(1, -1, HIDDEN_DIM)
+        )
         
         # Router network
         self.router = nn.Sequential(
@@ -373,21 +396,16 @@ class GuidedMoETransformer(nn.Module):
             nn.Linear(HIDDEN_DIM, num_experts)
         )
         
-        # Experts
+        # Initialize experts as GPT2 models
         self.experts = nn.ModuleList([
-            TransformerExpert() for _ in range(num_experts)
+            GPT2Expert() for _ in range(num_experts)
         ])
         
         # Output layer
         self.output = nn.Linear(HIDDEN_DIM, VOCAB_SIZE)
 
-    def get_pos_encoding_slice(self, seq_length):
-        """Get the appropriate slice of positional encoding"""
-        return self.pos_encoding[:, :seq_length, :]   
-    
     def create_expert_assignments(self):
         """Create token-type to expert assignments"""
-        # Simple assignment strategy: split vocabulary into ranges
         vocab_per_expert = VOCAB_SIZE // NUM_EXPERTS
         assignments = {}
         for expert_idx in range(NUM_EXPERTS):
@@ -397,40 +415,29 @@ class GuidedMoETransformer(nn.Module):
         return assignments
         
     def compute_token_expert_weights(self, tokens):
-        """Compute expert weights based on token assignments"""
         batch_size = tokens.size(0)
         weights = torch.zeros(batch_size, len(self.expert_assignments), device=tokens.device)
         
         for expert_idx, vocab_range in self.expert_assignments.items():
-            # Create tensor of assigned vocab indices for this expert
             vocab_indices = torch.tensor(vocab_range, device=tokens.device)
-            
-            # Check if each token in the sequence belongs to this expert's range
-            # mask shape will be [batch_size]
             mask = torch.any(
                 torch.isin(
-                    tokens.view(batch_size, -1),  # flatten sequence dimension
+                    tokens.view(batch_size, -1),
                     vocab_indices
                 ),
-                dim=1  # check across sequence length
+                dim=1
             )
-            
-            # Expand mask to match weights shape
             weights[:, expert_idx] = mask.float()
         
-        # Normalize weights
         row_sums = weights.sum(dim=1, keepdim=True)
         weights = weights / (row_sums + 1e-8)
         
         return weights
     
     def calculate_diversity_loss(self, expert_outputs):
-        """Calculate diversity loss between experts"""
-        # Flatten expert outputs for similarity calculation
         batch_size = expert_outputs.size(0)
         expert_outputs_flat = expert_outputs.view(batch_size, NUM_EXPERTS, -1)
         
-        # Calculate cosine similarity between expert outputs
         similarities = torch.matmul(
             expert_outputs_flat, 
             expert_outputs_flat.transpose(1, 2)
@@ -438,15 +445,12 @@ class GuidedMoETransformer(nn.Module):
         norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
         similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + 1e-8)
         
-        # We want to minimize similarity between different experts
         diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        return diversity_loss * 0.65
+        return diversity_loss
         
     def forward(self, x, return_losses=False):
-        # Embedding + positional encoding
+        # Embedding
         x = self.embedding(x)
-        pos_enc = self.get_pos_encoding_slice(x.size(1))
-        x = x + pos_enc
         
         # Calculate routing weights
         learned_weights = F.softmax(self.router(x.mean(dim=1)), dim=-1)
@@ -461,29 +465,30 @@ class GuidedMoETransformer(nn.Module):
             expert_outputs.append(expert(x))
         expert_outputs = torch.stack(expert_outputs, dim=1)
         
-        # Fix: Reshape routing weights to match expert_outputs dimensions
-        routing_weights = routing_weights.unsqueeze(-1).unsqueeze(-1)  # [batch_size, num_experts, 1, 1]
+        # Reshape routing weights for multiplication
+        routing_weights = routing_weights.unsqueeze(-1).unsqueeze(-1)
+        
         # Combine expert outputs
-        combined = torch.sum(expert_outputs * routing_weights, dim=1)  # [batch_size, seq_length, hidden_dim]
+        combined = torch.sum(expert_outputs * routing_weights, dim=1)
         
         # Generate output logits
         logits = self.output(combined)
         
         if return_losses and self.training:
-            # Compute routing loss
             routing_loss = F.kl_div(
                 learned_weights.log(), token_weights, reduction='batchmean'
-            )*0.35
+            )
             diversity_loss = self.calculate_diversity_loss(expert_outputs)
             
-            return logits, {'routing_loss': routing_loss, 
-                            'diversity_loss':diversity_loss
-                            }
+            return logits, {
+                'routing_loss': routing_loss,
+                'diversity_loss': diversity_loss
+            }
             
         return logits
 
 def train_model(model, train_loader, val_loader, num_epochs=10, device='cuda'):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs)
     
     best_loss = float('inf')
@@ -663,7 +668,7 @@ def evaluate_generation(model, tokenizer, test_prompts, device='cuda'):
         print(f"\nPrompt: {prompt}")
         print("\nGenerated continuation:")
         
-        for temp in [0.7, 1.0,1.5, 2.0]:
+        for temp in [0.5,0.7, 1.0,1.5, 2.0]:
             result = generate_text(
                 model, 
                 tokenizer, 
@@ -706,9 +711,9 @@ def test_generation(model_path, model_type="guided", device='cuda'):
     
     # Initialize model
     if model_type == "guided":
-        model = GuidedMoETransformer().to(device)
+        model = GuidedGPT2MoE().to(device)
     else:
-        model = UnGuidedMoETransformer().to(device)
+        model = UnGuidedGPT2MoE().to(device)
     
     # Load saved weights
     model.load_state_dict(torch.load(model_path))
@@ -718,7 +723,8 @@ def test_generation(model_path, model_type="guided", device='cuda'):
         "The history of artificial intelligence",
         "In recent scientific discoveries,",
         "The most important aspect of learning is",
-        "The future of technology lies in"
+        "The future of technology lies in",
+        "The great peot of Persia, Jallaludin Rumi once said, if the world brings you to your knees, you are in a"
     ]
     
     # Generate text
@@ -734,29 +740,29 @@ def main():
     set_seed(42)
         
     # Load data with specified fraction (e.g., 0.1 for 10% of data)
-    data_fraction = 0.1     
+    data_fraction = 0.01     
     train_loader, val_loader, test_loader = load_data(
-        batch_size=8,
+        batch_size=16,
         data_fraction=data_fraction
     )
     
     # Train unguided model
-    print("Training Unguided MoE Transformer...")
-    unguided_model = UnGuidedMoETransformer().to(device)
+    print("Training Unguided MoE GPT2...")
+    unguided_model = UnGuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in UnGuided MoE: {count_parameters(unguided_model):,}")
-    train_model(unguided_model, train_loader, val_loader,num_epochs=50)
+    #train_model(unguided_model, train_loader, val_loader,num_epochs=50)
     
     # Train guided model
-    print("\nTraining Guided MoE Transformer...")
-    guided_model = GuidedMoETransformer().to(device)
+    print("\nTraining Guided MoE GPT2...")
+    guided_model = GuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in Guided MoE: {count_parameters(guided_model):,}")
-    train_model(guided_model, train_loader, val_loader,num_epochs=50)
+    #train_model(guided_model, train_loader, val_loader,num_epochs=50)
 
     print("\nTesting Unguided Model Generation:")
-    test_generation('best_model_UnGuidedMoETransformer.pth', "unguided")
+    test_generation('best_model_UnGuidedGPT2MoE.pth', "unguided")
     
     print("\nTesting Guided Model Generation:")
-    test_generation('best_model_GuidedMoETransformer.pth', "guided")
+    test_generation('best_model_GuidedGPT2MoE.pth', "guided")
     
 if __name__ == '__main__':
     main()
