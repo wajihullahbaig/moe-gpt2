@@ -23,7 +23,7 @@ import os
 CONTEXT_LENGTH = 128
 VOCAB_SIZE = 50257  # GPT2 vocabulary size
 NUM_EXPERTS = 5
-HIDDEN_DIM = 128
+HIDDEN_DIM = 256
 NUM_HEADS = 8
 NUM_LAYERS = 12
 
@@ -208,13 +208,13 @@ def load_data(batch_size=32, data_fraction=1.0):
         val_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH//2
+        stride=CONTEXT_LENGTH
     )
     test_dataset = TextDataset(
         test_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH//2
+        stride=CONTEXT_LENGTH
     )
     
     # Print detailed statistics
@@ -740,7 +740,7 @@ def main():
     set_seed(42)
         
     # Load data with specified fraction (e.g., 0.1 for 10% of data)
-    data_fraction = 0.01     
+    data_fraction = 0.05     
     train_loader, val_loader, test_loader = load_data(
         batch_size=16,
         data_fraction=data_fraction
