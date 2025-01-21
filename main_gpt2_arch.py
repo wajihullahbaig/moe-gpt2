@@ -24,7 +24,7 @@ CONTEXT_LENGTH = 128
 VOCAB_SIZE = 50257  # GPT2 vocabulary size
 NUM_EXPERTS = 5
 HIDDEN_DIM = 128
-NUM_HEADS = 12
+NUM_HEADS = 8
 NUM_LAYERS = 12
 
 def set_seed(seed: Optional[int] = 42):
