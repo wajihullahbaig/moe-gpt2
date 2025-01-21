@@ -750,13 +750,13 @@ def main():
     print("Training Unguided MoE GPT2...")
     unguided_model = UnGuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in UnGuided MoE: {count_parameters(unguided_model):,}")
-    #train_model(unguided_model, train_loader, val_loader,num_epochs=50)
+    train_model(unguided_model, train_loader, val_loader,num_epochs=50)
     
     # Train guided model
     print("\nTraining Guided MoE GPT2...")
     guided_model = GuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in Guided MoE: {count_parameters(guided_model):,}")
-    #train_model(guided_model, train_loader, val_loader,num_epochs=50)
+    train_model(guided_model, train_loader, val_loader,num_epochs=50)
 
     print("\nTesting Unguided Model Generation:")
     test_generation('best_model_UnGuidedGPT2MoE.pth', "unguided")
