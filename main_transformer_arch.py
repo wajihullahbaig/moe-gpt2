@@ -19,11 +19,11 @@ import os
 
 
 # Constants
-CONTEXT_LENGTH = 12
+CONTEXT_LENGTH = 128
 VOCAB_SIZE = 50257  # GPT-2 vocabulary size
 NUM_EXPERTS = 5
 HIDDEN_DIM = 256 
-NUM_HEADS = 12   
+NUM_HEADS = 8   
 
 def set_seed(seed: Optional[int] = 42):
     if seed is not None:
