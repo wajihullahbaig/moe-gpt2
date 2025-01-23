@@ -21,11 +21,12 @@ import os
 
 
 CONTEXT_LENGTH = 128
+STRIDE = 32
 VOCAB_SIZE = 50257  # GPT2 vocabulary size
-NUM_EXPERTS = 5
+NUM_EXPERTS = 4
 HIDDEN_DIM = 256
 NUM_HEADS = 8
-NUM_LAYERS = 12
+NUM_LAYERS = 4
 
 def set_seed(seed: Optional[int] = 42):
     if seed is not None:
@@ -56,7 +57,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots_
                 
                 learned_weights = F.softmax(model.router(x.mean(dim=1)), dim=-1)
                 token_weights = model.compute_token_expert_weights(inputs)
-                routing_weights = 0.7 * learned_weights + 0.3 * token_weights
+                routing_weights = 0.6 * learned_weights + 0.4 * token_weights
             else:
                 # For unguided model, get routing weights
                 x = model.embedding(inputs)
@@ -200,7 +201,7 @@ def load_data(batch_size=32, data_fraction=1.0):
         train_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH
+        stride=STRIDE
     )
     
     # Validation and test should not have overlapping windows
@@ -208,13 +209,13 @@ def load_data(batch_size=32, data_fraction=1.0):
         val_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH
+        stride=STRIDE
     )
     test_dataset = TextDataset(
         test_texts, 
         tokenizer, 
         data_fraction=data_fraction,
-        stride=CONTEXT_LENGTH
+        stride=STRIDE
     )
     
     # Print detailed statistics
@@ -316,20 +317,61 @@ class UnGuidedGPT2MoE(nn.Module):
         # Output layer
         self.output = nn.Linear(HIDDEN_DIM, VOCAB_SIZE)
 
-    def calculate_diversity_loss(self, expert_outputs):
-        """Calculate diversity loss between experts"""
+    def calculate_diversity_loss(self, expert_outputs, method='cosine_abs', eps=1e-8):
+        """
+        Calculate diversity loss between experts.
+        
+        Args:
+        - expert_outputs: Tensor of shape (batch_size, num_experts, ...)
+        - method: String specifying the method to use. Options are:
+                'cosine', 'squared_diff', 'kl_div', 'cosine_abs', 'cosine_relu', 'cosine_squared'
+        - eps: Small value to avoid division by zero
+        
+        Returns:
+        - diversity_loss: Scalar tensor representing the diversity loss
+        """
         batch_size = expert_outputs.size(0)
-        expert_outputs_flat = expert_outputs.view(batch_size, NUM_EXPERTS, -1)
+        num_experts = expert_outputs.size(1)
+        expert_outputs_flat = expert_outputs.view(batch_size, num_experts, -1)
         
-        similarities = torch.matmul(
-            expert_outputs_flat, 
-            expert_outputs_flat.transpose(1, 2)
-        )
-        norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-        similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + 1e-8)
+        if method == 'cosine':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
         
-        diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
+        elif method == 'squared_diff':
+            differences = (expert_outputs_flat.unsqueeze(2) - expert_outputs_flat.unsqueeze(1)).pow(2).sum(-1)
+            diversity_loss = -torch.mean(torch.triu(differences.mean(0), diagonal=1))
+        
+        elif method == 'kl_div':
+            expert_probs = F.softmax(expert_outputs_flat, dim=-1)
+            kl_div = F.kl_div(expert_probs.log().unsqueeze(1), expert_probs.unsqueeze(2), reduction='none').sum(-1)
+            diversity_loss = -torch.mean(torch.triu(kl_div.mean(0), diagonal=1))
+        
+        elif method == 'cosine_abs':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.abs(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
+        
+        elif method == 'cosine_relu':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.relu(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
+        
+        elif method == 'cosine_squared':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = (similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)).pow(2)
+            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
         return diversity_loss
+
         
     def forward(self, x, return_losses=False):
         # Embedding
@@ -434,19 +476,61 @@ class GuidedGPT2MoE(nn.Module):
         
         return weights
     
-    def calculate_diversity_loss(self, expert_outputs):
+    def calculate_diversity_loss(self, expert_outputs, method='cosine_abs', eps=1e-8):
+        """
+        Calculate diversity loss between experts.
+        
+        Args:
+        - expert_outputs: Tensor of shape (batch_size, num_experts, ...)
+        - method: String specifying the method to use. Options are:
+                'cosine', 'squared_diff', 'kl_div', 'cosine_abs', 'cosine_relu', 'cosine_squared'
+        - eps: Small value to avoid division by zero
+        
+        Returns:
+        - diversity_loss: Scalar tensor representing the diversity loss
+        """
         batch_size = expert_outputs.size(0)
-        expert_outputs_flat = expert_outputs.view(batch_size, NUM_EXPERTS, -1)
+        num_experts = expert_outputs.size(1)
+        expert_outputs_flat = expert_outputs.view(batch_size, num_experts, -1)
         
-        similarities = torch.matmul(
-            expert_outputs_flat, 
-            expert_outputs_flat.transpose(1, 2)
-        )
-        norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-        similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + 1e-8)
+        if method == 'cosine':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
         
-        diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
+        elif method == 'squared_diff':
+            differences = (expert_outputs_flat.unsqueeze(2) - expert_outputs_flat.unsqueeze(1)).pow(2).sum(-1)
+            diversity_loss = -torch.mean(torch.triu(differences.mean(0), diagonal=1))
+        
+        elif method == 'kl_div':
+            expert_probs = F.softmax(expert_outputs_flat, dim=-1)
+            kl_div = F.kl_div(expert_probs.log().unsqueeze(1), expert_probs.unsqueeze(2), reduction='none').sum(-1)
+            diversity_loss = -torch.mean(torch.triu(kl_div.mean(0), diagonal=1))
+        
+        elif method == 'cosine_abs':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.abs(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
+        
+        elif method == 'cosine_relu':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
+            diversity_loss = torch.relu(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
+        
+        elif method == 'cosine_squared':
+            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
+            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
+            similarities = (similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)).pow(2)
+            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
         return diversity_loss
+
         
     def forward(self, x, return_losses=False):
         # Embedding
@@ -494,9 +578,8 @@ def train_model(model, train_loader, val_loader, num_epochs=10, device='cuda'):
     best_loss = float('inf')
     total_tokens_processed = 0  # Track total tokens across all epochs
     
-    # Create plot directories
-    os.makedirs('./plots', exist_ok=True)
-    
+     
+     
     # Training history
     history = {
         'train_loss': [],
@@ -740,7 +823,7 @@ def main():
     set_seed(42)
         
     # Load data with specified fraction (e.g., 0.1 for 10% of data)
-    data_fraction = 0.05     
+    data_fraction = 0.30
     train_loader, val_loader, test_loader = load_data(
         batch_size=16,
         data_fraction=data_fraction
@@ -750,13 +833,13 @@ def main():
     print("Training Unguided MoE GPT2...")
     unguided_model = UnGuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in UnGuided GPT2 MoE: {count_parameters(unguided_model):,}")
-    train_model(unguided_model, train_loader, val_loader,num_epochs=50)
+    train_model(unguided_model, train_loader, val_loader,num_epochs=100)
     
     # Train guided model
     print("\nTraining Guided MoE GPT2...")
     guided_model = GuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in Guided GPT 2 MoE: {count_parameters(guided_model):,}")
-    train_model(guided_model, train_loader, val_loader,num_epochs=50)
+    train_model(guided_model, train_loader, val_loader,num_epochs=100)
 
     print("\nTesting Unguided Model Generation:")
     test_generation('best_model_UnGuidedGPT2MoE.pth', "unguided")
