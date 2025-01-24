@@ -118,7 +118,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
     # Save plot
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if isinstance(model, GuidedMoETransformer) or isinstance(GuidedGPT2MoE):
+    if isinstance(model, GuidedMoETransformer) or isinstance(model,GuidedGPT2MoE):
         model_type = "guided"
     else:
         model_type = "unguided"
