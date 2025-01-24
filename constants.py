@@ -1,6 +1,6 @@
 
 # Constants
-CONTEXT_LENGTH = 256
+CONTEXT_LENGTH = 128
 STRIDE = 8
 VOCAB_SIZE = 50257  # GPT-2 vocabulary size
 NUM_EXPERTS = 8
