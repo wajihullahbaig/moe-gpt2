@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch
 from transformers import GPT2Config, GPT2Model
 
-from common import calculate_diversity_loss, set_seed
+from common import calculate_diversity_loss, create_expert_assignments, set_seed
 from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
 from dataset_loading import load_data
 from train_val import count_parameters, test_generation, train_model
@@ -128,7 +128,7 @@ class GuidedGPT2MoE(nn.Module):
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
         self.route_temp = nn.Parameter(torch.ones(1)*route_temp)
         # Expert assignments based on token types
-        self.expert_assignments = self.create_expert_assignments()
+        self.expert_assignments = create_expert_assignments()
         
         # Position encoding (from GPT2)
         self.register_buffer(

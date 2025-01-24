@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-from common import calculate_diversity_loss, set_seed
+from common import calculate_diversity_loss, create_expert_assignments, set_seed
 from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS
 from dataset_loading import load_data
 from train_val import count_parameters, test_generation, train_model
@@ -112,7 +112,7 @@ class GuidedMoETransformer(nn.Module):
             pos_encoding = torch.randn(1, CONTEXT_LENGTH, HIDDEN_DIM)
             self.register_buffer('pos_encoding', pos_encoding)
         # Expert assignments based on token types
-        self.expert_assignments = self.create_expert_assignments()
+        self.expert_assignments = create_expert_assignments()
         
         # Router network
         self.router = nn.Sequential(
@@ -211,7 +211,6 @@ def main():
     set_seed(42)
     viz_save_path = "./plots_transformer"    
     # Load data with specified fraction (e.g., 0.1 for 10% of data)
-    data_fraction = 0.3 
     train_loader, val_loader, test_loader = load_data(
         batch_size=BATCH_SIZE,
         data_fraction=DATA_FRACTION

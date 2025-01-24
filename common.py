@@ -118,7 +118,10 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
     # Save plot
     os.makedirs(save_path, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_type = "guided" if isinstance(model, GuidedMoETransformer) else "unguided"
+    if isinstance(model, GuidedMoETransformer) or isinstance(GuidedGPT2MoE):
+        model_type = "guided"
+    else:
+        model_type = "unguided"
     save_file = os.path.join(save_path, f'expert_viz_{model_type}_epoch{epoch}_{timestamp}.png')
     plt.savefig(save_file, dpi=200, bbox_inches='tight')
     plt.close()
