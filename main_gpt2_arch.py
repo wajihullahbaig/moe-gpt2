@@ -2,255 +2,13 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from transformers import GPT2Tokenizer
-from transformers import GPT2Model, GPT2Config
-from datasets import load_dataset
-import numpy as np
-from typing import Dict, Optional
-import random
-import os
-from collections import defaultdict
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
 import torch
-from datetime import datetime
-import os
+from transformers import GPT2Config, GPT2Model
 
-
-CONTEXT_LENGTH = 128
-STRIDE = 32
-VOCAB_SIZE = 50257  # GPT2 vocabulary size
-NUM_EXPERTS = 4
-HIDDEN_DIM = 256
-NUM_HEADS = 8
-NUM_LAYERS = 4
-
-def set_seed(seed: Optional[int] = 42):
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-
-def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots_gpt2'):
-    """Visualize expert usage patterns"""
-    model.eval()
-    expert_usage = []
-    token_expert_map = np.zeros((VOCAB_SIZE, NUM_EXPERTS))
-    
-    with torch.no_grad():
-        for inputs, _ in val_loader:
-            inputs = inputs.to(device)
-            
-            # Get expert weights based on model type
-            if isinstance(model, GuidedGPT2MoE):
-                # For guided model, get both learned and token-based weights
-                x = model.embedding(inputs)
-                # Get the correct slice of positional encoding
-                seq_length = x.size(1)
-                pos_enc = model.pos_encoding[:, :seq_length, :]
-                x = x + pos_enc
-                
-                learned_weights = F.softmax(model.router(x.mean(dim=1)), dim=-1)
-                token_weights = model.compute_token_expert_weights(inputs)
-                routing_weights = 0.6 * learned_weights + 0.4 * token_weights
-            else:
-                # For unguided model, get routing weights
-                x = model.embedding(inputs)
-                # Get the correct slice of positional encoding
-                seq_length = x.size(1)
-                pos_enc = model.pos_encoding[:, :seq_length, :]
-                x = x + pos_enc
-                
-                avg_hidden = x.mean(dim=1)
-                routing_logits = model.router(avg_hidden)
-                routing_weights = F.softmax(routing_logits, dim=-1)
-            
-            expert_usage.append(routing_weights.cpu().numpy())
-            
-            # Track token-to-expert mapping
-            for batch_idx in range(inputs.size(0)):
-                for token in inputs[batch_idx]:
-                    token_expert_map[token.item()] += routing_weights[batch_idx].cpu().numpy()
-    
-    # Create figure with multiple subplots
-    fig = plt.figure(figsize=(15, 10))
-    
-    # 1. Overall Expert Usage
-    plt.subplot(2, 2, 1)
-    avg_usage = np.mean(np.concatenate(expert_usage, axis=0), axis=0)
-    plt.bar(range(NUM_EXPERTS), avg_usage)
-    plt.title('Overall Expert Utilization')
-    plt.xlabel('Expert ID')
-    plt.ylabel('Average Usage')
-    
-    # 2. Expert Usage Distribution
-    plt.subplot(2, 2, 2)
-    usage_dist = np.concatenate(expert_usage, axis=0)
-    sns.boxplot(data=usage_dist)
-    plt.title('Expert Usage Distribution')
-    plt.xlabel('Expert ID')
-    plt.ylabel('Usage')
-    
-    # 3. Token-Expert Heat Map (Top 100 most common tokens)
-    plt.subplot(2, 2, 3)
-    top_tokens = 100
-    token_usage_sum = token_expert_map.sum(axis=1)
-    top_token_indices = np.argsort(token_usage_sum)[-top_tokens:]
-    sns.heatmap(token_expert_map[top_token_indices], 
-                cmap='YlOrRd',
-                xticklabels=[f'E{i}' for i in range(NUM_EXPERTS)],
-                yticklabels=False)
-    plt.title(f'Top {top_tokens} Tokens Expert Assignment')
-    plt.xlabel('Expert ID')
-    plt.ylabel('Token ID')
-    
-    # 4. Expert Specialization Score
-    plt.subplot(2, 2, 4)
-    specialization = np.zeros(NUM_EXPERTS)
-    for expert_idx in range(NUM_EXPERTS):
-        if isinstance(model, GuidedGPT2MoE):
-            # For guided model, compare with assigned vocabulary ranges
-            assigned_tokens = model.expert_assignments[expert_idx]
-            specialization[expert_idx] = np.mean(token_expert_map[assigned_tokens, expert_idx])
-        else:
-            # For unguided model, measure concentration of token assignments
-            token_probs = token_expert_map[:, expert_idx] / (token_expert_map.sum(axis=1) + 1e-8)
-            specialization[expert_idx] = np.mean(token_probs > 0.5)
-    
-    plt.bar(range(NUM_EXPERTS), specialization)
-    plt.title('Expert Specialization Score')
-    plt.xlabel('Expert ID')
-    plt.ylabel('Specialization')
-    
-    plt.tight_layout()
-    
-    # Save plot
-    os.makedirs(save_path, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_type = "guided" if isinstance(model, GuidedGPT2MoE) else "unguided"
-    save_file = os.path.join(save_path, f'expert_viz_{model_type}_epoch{epoch}_{timestamp}.png')
-    plt.savefig(save_file, dpi=200, bbox_inches='tight')
-    plt.close()
-    
-    return {
-        'expert_usage': avg_usage,
-        'specialization': specialization
-    }
-
-            
-class TextDataset(Dataset):
-    def __init__(self, texts, tokenizer, max_length=CONTEXT_LENGTH, data_fraction=1.0, stride=None):
-        self.encodings = []
-        self.labels = []
-        self.total_tokens = 0
-        
-        # If stride is None, use non-overlapping windows for test/val
-        if stride is None:
-            stride = max_length  # No overlap
-        
-        # Calculate how many texts to use based on fraction
-        num_texts = int(len(texts) * data_fraction)
-        texts = texts[:num_texts]
-        
-        for text in tqdm(texts, desc="Processing texts"):
-            if isinstance(text, str) and text.strip():
-                tokens = tokenizer.encode(text)
-                self.total_tokens += len(tokens)
-                
-                # Use stride to control overlap
-                for i in range(0, len(tokens) - max_length, stride):
-                    chunk = tokens[i:i + max_length]
-                    if len(chunk) == max_length:
-                        self.encodings.append(chunk[:-1])
-                        self.labels.append(chunk[1:])
-    
-    def __len__(self):
-        return len(self.encodings)
-    
-    def get_stats(self):
-        """Return statistics about the dataset"""
-        return {
-            'num_sequences': len(self.encodings),
-            'total_tokens': self.total_tokens,
-            'avg_tokens_per_seq': self.total_tokens / len(self.encodings) if self.encodings else 0
-        }
-        
-    def __getitem__(self, idx):
-        return torch.tensor(self.encodings[idx]), torch.tensor(self.labels[idx])           
-
-def load_data(batch_size=32, data_fraction=1.0):
-    """Load and prepare data with specified fraction and token counting"""
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    
-    print(f"Loading Wikitext-2 dataset with {data_fraction*100}% of data...")
-    dataset = load_dataset('wikitext', 'wikitext-2-raw-v1')
-    
-    # Get texts
-    train_texts = dataset['train']['text']
-    val_texts = dataset['validation']['text']
-    test_texts = dataset['test']['text']
-    
-    print(f"Creating datasets...")
-    # Training data can have overlapping windows
-    train_dataset = TextDataset(
-        train_texts, 
-        tokenizer, 
-        data_fraction=data_fraction,
-        stride=STRIDE
-    )
-    
-    # Validation and test should not have overlapping windows
-    val_dataset = TextDataset(
-        val_texts, 
-        tokenizer, 
-        data_fraction=data_fraction,
-        stride=STRIDE
-    )
-    test_dataset = TextDataset(
-        test_texts, 
-        tokenizer, 
-        data_fraction=data_fraction,
-        stride=STRIDE
-    )
-    
-    # Print detailed statistics
-    for name, dataset in [('Train', train_dataset), ('Val', val_dataset), ('Test', test_dataset)]:
-        stats = dataset.get_stats()
-        print(f"\n{name} Dataset Statistics:")
-        print(f"Number of sequences: {stats['num_sequences']}")
-        print(f"Total tokens: {stats['total_tokens']:,}")
-        print(f"Average tokens per sequence: {stats['avg_tokens_per_seq']:.2f}")
-    
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=4, 
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False,  # No shuffling for validation
-        num_workers=4, 
-        pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        shuffle=False,  # No shuffling for test
-        num_workers=4, 
-        pin_memory=True
-    )
-    
-    return train_loader, val_loader, test_loader
-
+from common import calculate_diversity_loss, set_seed
+from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
+from dataset_loading import load_data
+from train_val import count_parameters, test_generation, train_model
 
 
 class GPT2Expert(nn.Module):
@@ -282,7 +40,7 @@ class GPT2Expert(nn.Module):
         return outputs.last_hidden_state
 
 class UnGuidedGPT2MoE(nn.Module):
-    def __init__(self, num_experts=NUM_EXPERTS):
+    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.3,route_temp = 1.2):
         super().__init__()
         # Initialize GPT2 embedding layer
         config = GPT2Config(
@@ -291,7 +49,7 @@ class UnGuidedGPT2MoE(nn.Module):
             n_embd=HIDDEN_DIM
         )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
-        
+        self.route_temp = nn.Parameter(torch.ones(1)*route_temp)
         # Position encoding (from GPT2)
         position = torch.arange(CONTEXT_LENGTH, dtype=torch.long)
         div_term = torch.exp(torch.arange(0, HIDDEN_DIM, 2).float() * (-math.log(10000.0) / HIDDEN_DIM))
@@ -306,6 +64,7 @@ class UnGuidedGPT2MoE(nn.Module):
         self.router = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(HIDDEN_DIM, num_experts)
         )
         
@@ -317,60 +76,6 @@ class UnGuidedGPT2MoE(nn.Module):
         # Output layer
         self.output = nn.Linear(HIDDEN_DIM, VOCAB_SIZE)
 
-    def calculate_diversity_loss(self, expert_outputs, method='cosine_abs', eps=1e-8):
-        """
-        Calculate diversity loss between experts.
-        
-        Args:
-        - expert_outputs: Tensor of shape (batch_size, num_experts, ...)
-        - method: String specifying the method to use. Options are:
-                'cosine', 'squared_diff', 'kl_div', 'cosine_abs', 'cosine_relu', 'cosine_squared'
-        - eps: Small value to avoid division by zero
-        
-        Returns:
-        - diversity_loss: Scalar tensor representing the diversity loss
-        """
-        batch_size = expert_outputs.size(0)
-        num_experts = expert_outputs.size(1)
-        expert_outputs_flat = expert_outputs.view(batch_size, num_experts, -1)
-        
-        if method == 'cosine':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        
-        elif method == 'squared_diff':
-            differences = (expert_outputs_flat.unsqueeze(2) - expert_outputs_flat.unsqueeze(1)).pow(2).sum(-1)
-            diversity_loss = -torch.mean(torch.triu(differences.mean(0), diagonal=1))
-        
-        elif method == 'kl_div':
-            expert_probs = F.softmax(expert_outputs_flat, dim=-1)
-            kl_div = F.kl_div(expert_probs.log().unsqueeze(1), expert_probs.unsqueeze(2), reduction='none').sum(-1)
-            diversity_loss = -torch.mean(torch.triu(kl_div.mean(0), diagonal=1))
-        
-        elif method == 'cosine_abs':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.abs(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
-        
-        elif method == 'cosine_relu':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.relu(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
-        
-        elif method == 'cosine_squared':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = (similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)).pow(2)
-            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        return diversity_loss
 
         
     def forward(self, x, return_losses=False):
@@ -380,7 +85,7 @@ class UnGuidedGPT2MoE(nn.Module):
         # Calculate routing weights
         avg_hidden = x.mean(dim=1)
         routing_logits = self.router(avg_hidden)
-        routing_weights = F.softmax(routing_logits, dim=-1)
+        routing_weights = F.softmax(routing_logits/self.route_temp, dim=-1)
         
         # Process through experts
         expert_outputs = []
@@ -403,7 +108,7 @@ class UnGuidedGPT2MoE(nn.Module):
                 routing_weights.mean(0),
                 torch.ones_like(routing_weights.mean(0)) / NUM_EXPERTS
             )
-            diversity_loss = self.calculate_diversity_loss(expert_outputs)
+            diversity_loss = calculate_diversity_loss(expert_outputs)
             return logits, {
                 'balance_loss': balance_loss,
                 'diversity_loss': diversity_loss
@@ -412,7 +117,7 @@ class UnGuidedGPT2MoE(nn.Module):
         return logits
 
 class GuidedGPT2MoE(nn.Module):
-    def __init__(self, num_experts=NUM_EXPERTS):
+    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.3,route_temp=1.2):
         super().__init__()
         # Initialize GPT2 embedding layer
         config = GPT2Config(
@@ -421,20 +126,21 @@ class GuidedGPT2MoE(nn.Module):
             n_embd=HIDDEN_DIM
         )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
-        
+        self.route_temp = nn.Parameter(torch.ones(1)*route_temp)
         # Expert assignments based on token types
         self.expert_assignments = self.create_expert_assignments()
         
         # Position encoding (from GPT2)
         self.register_buffer(
             "pos_encoding",
-            torch.arange(0, CONTEXT_LENGTH).unsqueeze(0).expand(1, -1, HIDDEN_DIM)
+            torch.arange(0, CONTEXT_LENGTH).unsqueeze(0).unsqueeze(-1).expand(1, -1, HIDDEN_DIM)
         )
         
         # Router network
         self.router = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(HIDDEN_DIM, num_experts)
         )
         
@@ -446,102 +152,47 @@ class GuidedGPT2MoE(nn.Module):
         # Output layer
         self.output = nn.Linear(HIDDEN_DIM, VOCAB_SIZE)
 
-    def create_expert_assignments(self):
-        """Create token-type to expert assignments"""
-        vocab_per_expert = VOCAB_SIZE // NUM_EXPERTS
-        assignments = {}
-        for expert_idx in range(NUM_EXPERTS):
-            start_idx = expert_idx * vocab_per_expert
-            end_idx = start_idx + vocab_per_expert if expert_idx < NUM_EXPERTS-1 else VOCAB_SIZE
-            assignments[expert_idx] = list(range(start_idx, end_idx))
-        return assignments
-        
+
     def compute_token_expert_weights(self, tokens):
+        """Compute expert weights based on token assignments"""
         batch_size = tokens.size(0)
         weights = torch.zeros(batch_size, len(self.expert_assignments), device=tokens.device)
         
         for expert_idx, vocab_range in self.expert_assignments.items():
+            # Create tensor of assigned vocab indices for this expert
             vocab_indices = torch.tensor(vocab_range, device=tokens.device)
+            
+            # Check if each token in the sequence belongs to this expert's range
+            # mask shape will be [batch_size]
             mask = torch.any(
                 torch.isin(
-                    tokens.view(batch_size, -1),
+                    tokens.view(batch_size, -1),  # flatten sequence dimension
                     vocab_indices
                 ),
-                dim=1
+                dim=1  # check across sequence length
             )
+            
+            # Expand mask to match weights shape
             weights[:, expert_idx] = mask.float()
         
+        # Normalize weights
         row_sums = weights.sum(dim=1, keepdim=True)
         weights = weights / (row_sums + 1e-8)
-        
-        return weights
-    
-    def calculate_diversity_loss(self, expert_outputs, method='cosine_abs', eps=1e-8):
-        """
-        Calculate diversity loss between experts.
-        
-        Args:
-        - expert_outputs: Tensor of shape (batch_size, num_experts, ...)
-        - method: String specifying the method to use. Options are:
-                'cosine', 'squared_diff', 'kl_div', 'cosine_abs', 'cosine_relu', 'cosine_squared'
-        - eps: Small value to avoid division by zero
-        
-        Returns:
-        - diversity_loss: Scalar tensor representing the diversity loss
-        """
-        batch_size = expert_outputs.size(0)
-        num_experts = expert_outputs.size(1)
-        expert_outputs_flat = expert_outputs.view(batch_size, num_experts, -1)
-        
-        if method == 'cosine':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        
-        elif method == 'squared_diff':
-            differences = (expert_outputs_flat.unsqueeze(2) - expert_outputs_flat.unsqueeze(1)).pow(2).sum(-1)
-            diversity_loss = -torch.mean(torch.triu(differences.mean(0), diagonal=1))
-        
-        elif method == 'kl_div':
-            expert_probs = F.softmax(expert_outputs_flat, dim=-1)
-            kl_div = F.kl_div(expert_probs.log().unsqueeze(1), expert_probs.unsqueeze(2), reduction='none').sum(-1)
-            diversity_loss = -torch.mean(torch.triu(kl_div.mean(0), diagonal=1))
-        
-        elif method == 'cosine_abs':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.abs(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
-        
-        elif method == 'cosine_relu':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)
-            diversity_loss = torch.relu(torch.mean(torch.triu(similarities.mean(0), diagonal=1)))
-        
-        elif method == 'cosine_squared':
-            similarities = torch.matmul(expert_outputs_flat, expert_outputs_flat.transpose(1, 2))
-            norms = torch.norm(expert_outputs_flat, dim=2, keepdim=True)
-            similarities = (similarities / (torch.matmul(norms, norms.transpose(1, 2)) + eps)).pow(2)
-            diversity_loss = torch.mean(torch.triu(similarities.mean(0), diagonal=1))
-        
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        return diversity_loss
 
-        
+        return weights   
+            
     def forward(self, x, return_losses=False):
         # Embedding
         x = self.embedding(x)
         
         # Calculate routing weights
-        learned_weights = F.softmax(self.router(x.mean(dim=1)), dim=-1)
+        avg_hidden = x.mean(dim=1)
+        routing_logits = self.router(avg_hidden)
+        learned_weights = F.softmax(routing_logits/self.route_temp, dim=-1)
         token_weights = self.compute_token_expert_weights(x)
         
         # Combine learned and token-based weights
-        routing_weights = 0.7 * learned_weights + 0.3 * token_weights
+        routing_weights = 0.8 * learned_weights + 0.2 * token_weights
         
         # Process through experts
         expert_outputs = []
@@ -562,7 +213,7 @@ class GuidedGPT2MoE(nn.Module):
             routing_loss = F.kl_div(
                 learned_weights.log(), token_weights, reduction='batchmean'
             )
-            diversity_loss = self.calculate_diversity_loss(expert_outputs)
+            diversity_loss = calculate_diversity_loss(expert_outputs)
             
             return logits, {
                 'routing_loss': routing_loss,
@@ -570,276 +221,29 @@ class GuidedGPT2MoE(nn.Module):
             }
             
         return logits
-
-def train_model(model, train_loader, val_loader, num_epochs=10, device='cuda'):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)  
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs)
-    
-    best_loss = float('inf')
-    total_tokens_processed = 0  # Track total tokens across all epochs
-    
-     
-     
-    # Training history
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'expert_usage': [],
-        'specialization': [],
-        'tokens_per_epoch': [],  # Track tokens for each epoch
-        'total_tokens': []       # Running total of tokens
-    }
-    
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        epoch_aux_losses = defaultdict(float)
-        epoch_tokens = 0  # Track tokens for this epoch
-        
-        for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader)):
-            inputs, targets = inputs.to(device), targets.to(device)
-            
-            # Count tokens in this batch
-            batch_tokens = inputs.numel()
-            epoch_tokens += batch_tokens
-            
-            optimizer.zero_grad()
-            outputs, aux_losses = model(inputs, return_losses=True)
-            
-            # Compute main loss
-            main_loss = F.cross_entropy(outputs.view(-1, VOCAB_SIZE), targets.view(-1))
-            
-            # Track auxiliary losses
-            for loss_name, loss_value in aux_losses.items():
-                epoch_aux_losses[loss_name] += loss_value.item()
-            
-            # Add auxiliary losses
-            total_batch_loss = main_loss + sum(aux_losses.values())
-            
-            total_batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            total_loss += total_batch_loss.item()
-        
-        # Update total tokens
-        total_tokens_processed += epoch_tokens
-        
-        # Calculate average losses
-        avg_loss = total_loss / len(train_loader)
-        avg_aux_losses = {name: value / len(train_loader) 
-                         for name, value in epoch_aux_losses.items()}
-        
-        # Evaluate
-        val_loss = evaluate(model, val_loader, device)
-        
-        # Visualize expert behavior
-        if epoch % 5 == 0 or epoch == num_epochs - 1:
-            viz_stats = visualize_expert_usage(model, val_loader, device, epoch)
-            history['expert_usage'].append(viz_stats['expert_usage'])
-            history['specialization'].append(viz_stats['specialization'])
-        
-        # Print metrics
-        print(f'\nEpoch {epoch+1}:')
-        print(f'Train Loss = {avg_loss:.4f}, Val Loss = {val_loss:.4f}')
-        print(f'Tokens this epoch: {epoch_tokens:,}')
-        print(f'Total tokens processed: {total_tokens_processed:,}')
-        for name, value in avg_aux_losses.items():
-            print(f'{name} = {value:.4f}')
-        
-        # Save best model
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(model.state_dict(), 
-                      f'best_model_{type(model).__name__}.pth')
-        
-        # Update learning rate
-        scheduler.step()
-        
-        # Store metrics
-        history['train_loss'].append(avg_loss)
-        history['val_loss'].append(val_loss)
-        history['tokens_per_epoch'].append(epoch_tokens)
-        history['total_tokens'].append(total_tokens_processed)
-    
-    # Print final token statistics
-    print('\nFinal Token Statistics:')
-    print(f'Average tokens per epoch: {np.mean(history["tokens_per_epoch"]):,.0f}')
-    print(f'Total tokens processed: {total_tokens_processed:,}')
-    
-    return history
-
-def evaluate(model, val_loader, device):
-    model.eval()
-    total_loss = 0
-    
-    with torch.no_grad():
-        for inputs, targets in val_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = F.cross_entropy(outputs.view(-1, VOCAB_SIZE), targets.view(-1))
-            total_loss += loss.item()
-            
-    return total_loss / len(val_loader)
-
-def generate_text(model, tokenizer, input_text, max_new_tokens=50, temperature=0.7, device='cuda'):
-    """Generate text with token counting"""
-    model.eval()
-    
-    # Encode input text
-    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(device)
-    input_token_count = input_ids.size(1)
-    
-    # Initialize generated sequence with input
-    generated = input_ids
-    generated_token_count = 0
-    
-    # Generate one token at a time
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            # Take last context_length tokens if input is too long
-            if generated.size(1) > CONTEXT_LENGTH - 1:
-                context = generated[:, -(CONTEXT_LENGTH - 1):]
-            else:
-                context = generated
-                
-            try:
-                outputs = model(context)
-                next_token_logits = outputs[:, -1, :] / temperature
-                probs = F.softmax(next_token_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-                
-                generated = torch.cat([generated, next_token], dim=1)
-                generated_token_count += 1
-                
-                if next_token.item() == tokenizer.eos_token_id:
-                    break
-                    
-            except RuntimeError as e:
-                print(f"Error during generation at token {generated_token_count}")
-                print(f"Current sequence length: {generated.size(1)}")
-                print(f"Context length: {context.size(1)}")
-                raise e
-    
-    # Decode generated tokens
-    try:
-        generated_text = tokenizer.decode(generated[0], skip_special_tokens=True)
-    except Exception as e:
-        print("Error during decoding")
-        print(f"Generated tensor shape: {generated.shape}")
-        print(f"Generated tokens: {generated.tolist()}")
-        raise e
-    
-    # Return text and token counts
-    return {
-        'text': generated_text,
-        'input_tokens': input_token_count,
-        'generated_tokens': generated_token_count,
-        'total_tokens': input_token_count + generated_token_count
-    }
-def evaluate_generation(model, tokenizer, test_prompts, device='cuda'):
-    """Evaluate generation with token counting"""
-    model.eval()
-    
-    print("\nGenerating text from test prompts:")
-    print("-" * 50)
-    
-    total_input_tokens = 0
-    total_generated_tokens = 0
-    
-    for prompt in test_prompts:
-        print(f"\nPrompt: {prompt}")
-        print("\nGenerated continuation:")
-        
-        for temp in [0.5,0.7, 1.0,1.5, 2.0]:
-            result = generate_text(
-                model, 
-                tokenizer, 
-                prompt, 
-                max_new_tokens=50, 
-                temperature=temp,
-                device=device
-            )
-            
-            total_input_tokens += result['input_tokens']
-            total_generated_tokens += result['generated_tokens']
-            
-            # Print continuation and token counts
-            continuation = result['text'][len(prompt):]
-            print(f"\nTemperature {temp}:")
-            print(continuation)
-            print(f"Tokens - Input: {result['input_tokens']}, "
-                  f"Generated: {result['generated_tokens']}, "
-                  f"Total: {result['total_tokens']}")
-            print("-" * 30)
-    
-    print("\nOverall Token Statistics:")
-    print(f"Total input tokens: {total_input_tokens}")
-    print(f"Total generated tokens: {total_generated_tokens}")
-    print(f"Total tokens processed: {total_input_tokens + total_generated_tokens}")
-
-
-# Example usage:
-def test_generation(model_path, model_type="guided", device='cuda'):
-    """
-    Test text generation with a saved model
-    
-    Args:
-        model_path (str): Path to saved model weights
-        model_type (str): "guided" or "unguided"
-        device: torch device
-    """
-    # Initialize tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    
-    # Initialize model
-    if model_type == "guided":
-        model = GuidedGPT2MoE().to(device)
-    else:
-        model = UnGuidedGPT2MoE().to(device)
-    
-    # Load saved weights
-    model.load_state_dict(torch.load(model_path))
-    
-    # Test prompts
-    test_prompts = [
-        "The history of artificial intelligence",
-        "In recent scientific discoveries,",
-        "The most important aspect of learning is",
-        "The future of technology lies in",
-        "The great peot of Persia, Jallaludin Rumi once said, if the world brings you to your knees, you are in a"
-    ]
-    
-    # Generate text
-    evaluate_generation(model, tokenizer, test_prompts, device)
-
-def count_parameters(model):
-    """Count total trainable parameters in the model"""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
     
 def main():
     # Set device and seed
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     set_seed(42)
-        
-    # Load data with specified fraction (e.g., 0.1 for 10% of data)
-    data_fraction = 0.30
+    viz_save_path = "./plots_gpt2"        
+    # Load data with specified fraction (e.g., 0.1 for 10% of data)        
     train_loader, val_loader, test_loader = load_data(
-        batch_size=16,
-        data_fraction=data_fraction
+        batch_size=BATCH_SIZE,
+        data_fraction=DATA_FRACTION
     )
     
     # Train unguided model
     print("Training Unguided MoE GPT2...")
     unguided_model = UnGuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in UnGuided GPT2 MoE: {count_parameters(unguided_model):,}")
-    train_model(unguided_model, train_loader, val_loader,num_epochs=100)
+    train_model(unguided_model, train_loader, val_loader,num_epochs=TOTAL_EPOCHS,viz_path=viz_save_path)
     
     # Train guided model
     print("\nTraining Guided MoE GPT2...")
     guided_model = GuidedGPT2MoE().to(device)
     print(f"\nTotal trainable parameters in Guided GPT 2 MoE: {count_parameters(guided_model):,}")
-    train_model(guided_model, train_loader, val_loader,num_epochs=100)
+    train_model(guided_model, train_loader, val_loader,num_epochs=TOTAL_EPOCHS,viz_path=viz_save_path)
 
     print("\nTesting Unguided Model Generation:")
     test_generation('best_model_UnGuidedGPT2MoE.pth', "unguided")
