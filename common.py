@@ -43,7 +43,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
                 
                 learned_weights = F.softmax(model.router(x.mean(dim=1)), dim=-1)
                 token_weights = model.compute_token_expert_weights(inputs)
-                routing_weights = 0.7 * learned_weights + 0.3 * token_weights
+                routing_weights = 0.5 * learned_weights + 0.5 * token_weights
             else:
                 # For unguided model, get routing weights
                 x = model.embedding(inputs)
@@ -99,7 +99,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
     plt.subplot(2, 2, 4)
     specialization = np.zeros(NUM_EXPERTS)
     for expert_idx in range(NUM_EXPERTS):
-        if isinstance(model, GuidedMoETransformer):
+        if isinstance(model, GuidedMoETransformer) or isinstance(model,GuidedGPT2MoE):
             # For guided model, compare with assigned vocabulary ranges
             assigned_tokens = model.expert_assignments[expert_idx]
             specialization[expert_idx] = np.mean(token_expert_map[assigned_tokens, expert_idx])
