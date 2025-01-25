@@ -14,7 +14,7 @@ from constants import CONTEXT_LENGTH, VOCAB_SIZE
 
 
 def train_model(model, train_loader, val_loader, num_epochs=10,viz_path=None, device='cuda'):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)  
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-2, weight_decay=0.001)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs)
     
     best_loss = float('inf')
@@ -221,9 +221,7 @@ def evaluate_generation(model, tokenizer, test_prompts, device='cuda'):
 
 
 # Example usage:
-def test_generation(model_path, model_type="guided", device='cuda'):
-    from main_transformer_arch import GuidedMoETransformer, UnGuidedMoETransformer
-    from main_gpt2_arch import GuidedMoETransformer, UnGuidedMoETransformer
+def test_generation(model, device='cuda'):
     """
     Test text generation with a saved model
     
@@ -234,15 +232,7 @@ def test_generation(model_path, model_type="guided", device='cuda'):
     """
     # Initialize tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    
-    # Initialize model
-    if model_type == "guided":
-        model = GuidedMoETransformer().to(device)
-    else:
-        model = UnGuidedMoETransformer().to(device)
-    
-    # Load saved weights
-    model.load_state_dict(torch.load(model_path))
+        
     
     # Test prompts
     test_prompts = [

@@ -6,7 +6,7 @@ import torch
 from transformers import GPT2Config, GPT2Model
 
 from common import calculate_diversity_loss, create_expert_assignments, set_seed
-from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
+from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, LEARNED_WEIGHTS_WEIGHTAGE, TOKEN_ASSIGNMENT_WEIGHTAGE, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
 from dataset_loading import load_data
 from train_val import count_parameters, test_generation, train_model
 
@@ -127,6 +127,7 @@ class GuidedGPT2MoE(nn.Module):
         )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
         self.route_temp = nn.Parameter(torch.ones(1)*route_temp)
+        self.expert_assigner
         # Expert assignments based on token types
         self.expert_assignments = create_expert_assignments()
         
@@ -192,7 +193,7 @@ class GuidedGPT2MoE(nn.Module):
         token_weights = self.compute_token_expert_weights(x)
         
         # Combine learned and token-based weights
-        routing_weights = 0.8 * learned_weights + 0.2 * token_weights
+        routing_weights = LEARNED_WEIGHTS_WEIGHTAGE * learned_weights + TOKEN_ASSIGNMENT_WEIGHTAGE * token_weights
         
         # Process through experts
         expert_outputs = []
@@ -246,10 +247,10 @@ def main():
     train_model(guided_model, train_loader, val_loader,num_epochs=TOTAL_EPOCHS,viz_path=viz_save_path)
 
     print("\nTesting Unguided Model Generation:")
-    test_generation('best_model_UnGuidedGPT2MoE.pth', "unguided")
+    test_generation(unguided_model)
     
     print("\nTesting Guided Model Generation:")
-    test_generation('best_model_GuidedGPT2MoE.pth', "guided")
+    test_generation(guided_model)
     
 if __name__ == '__main__':
     main()

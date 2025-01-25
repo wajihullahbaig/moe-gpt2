@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch
 
 from common import calculate_diversity_loss, create_expert_assignments, set_seed
-from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS
+from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, LEARNED_WEIGHTS_WEIGHTAGE, TOKEN_ASSIGNMENT_WEIGHTAGE, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS
 from dataset_loading import load_data
 from train_val import count_parameters, test_generation, train_model
 
@@ -175,7 +175,7 @@ class GuidedMoETransformer(nn.Module):
         token_weights = self.compute_token_expert_weights(x)
         
         # Combine learned and token-based weights
-        routing_weights = 0.8 * learned_weights + 0.2 * token_weights
+        routing_weights = LEARNED_WEIGHTS_WEIGHTAGE * learned_weights + TOKEN_ASSIGNMENT_WEIGHTAGE * token_weights
         
         # Process through experts
         expert_outputs = []
@@ -229,10 +229,10 @@ def main():
     train_model(guided_model, train_loader, val_loader,num_epochs=TOTAL_EPOCHS,viz_path=viz_save_path)
 
     print("\nTesting Unguided Model Generation:")
-    test_generation('best_model_UnGuidedMoETransformer.pth', "unguided")
+    test_generation(unguided_model)
     
     print("\nTesting Guided Model Generation:")
-    test_generation('best_model_GuidedMoETransformer.pth', "guided")
+    test_generation(guided_model)
     
 if __name__ == '__main__':
     main()

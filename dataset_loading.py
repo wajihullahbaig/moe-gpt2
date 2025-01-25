@@ -53,6 +53,7 @@ def load_data(batch_size=32, data_fraction=1.0):
     
     print(f"Loading Wikitext-2 dataset with {data_fraction*100}% of data...")
     dataset = load_dataset('wikitext', 'wikitext-2-raw-v1')
+    #dataset = load_dataset('wikimedia/wikipedia', '20231101.en')
     
     # Get texts
     train_texts = dataset['train']['text']
@@ -114,3 +115,5 @@ def load_data(batch_size=32, data_fraction=1.0):
     )
     
     return train_loader, val_loader, test_loader
+
+
