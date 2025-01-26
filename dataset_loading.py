@@ -13,11 +13,9 @@ class TextDataset(Dataset):
         self.labels = []
         self.total_tokens = 0
         
-        # If stride is None, use non-overlapping windows for test/val
         if stride is None:
-            stride = max_length  # No overlap
+            stride = max_length
         
-        # Calculate how many texts to use based on fraction
         num_texts = int(len(texts) * data_fraction)
         texts = texts[:num_texts]
         
@@ -26,26 +24,39 @@ class TextDataset(Dataset):
                 tokens = tokenizer.encode(text)
                 self.total_tokens += len(tokens)
                 
-                # Use stride to control overlap
-                for i in range(0, len(tokens) - max_length, stride):
+                for i in range(0, len(tokens), stride):
                     chunk = tokens[i:i + max_length]
+                    
+                    # Ensure chunk is long enough
                     if len(chunk) == max_length:
                         self.encodings.append(chunk[:-1])
                         self.labels.append(chunk[1:])
+        
+        # Add debug print
+        print(f"Processed {len(self.encodings)} sequences")
+        print(f"First encoding sample: {self.encodings[0] if self.encodings else 'No encodings'}")
+        print(f"First label sample: {self.labels[0] if self.labels else 'No labels'}")
     
     def __len__(self):
         return len(self.encodings)
     
+    def __getitem__(self, idx):
+        # Add error checking
+        if idx < 0 or idx >= len(self.encodings):
+            raise IndexError(f"Index {idx} out of range")
+        
+        # Ensure both encodings and labels are not None
+        if self.encodings[idx] is None or self.labels[idx] is None:
+            raise ValueError(f"None value at index {idx}")
+        
+        return torch.tensor(self.encodings[idx]), torch.tensor(self.labels[idx])
+    
     def get_stats(self):
-        """Return statistics about the dataset"""
         return {
             'num_sequences': len(self.encodings),
             'total_tokens': self.total_tokens,
             'avg_tokens_per_seq': self.total_tokens / len(self.encodings) if self.encodings else 0
         }
-        
-    def __getitem__(self, idx):
-        return torch.tensor(self.encodings[idx]), torch.tensor(self.labels[idx])           
 
 def load_data(batch_size=32, data_fraction=1.0):
     """Load and prepare data with specified fraction and token counting"""
