@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from datetime import datetime
 
-from constants import CONTEXT_LENGTH, NUM_EXPERTS, STRIDE, VOCAB_SIZE
+from constants import CONTEXT_LENGTH, LEARNED_WEIGHTS_WEIGHTAGE, NUM_EXPERTS, STRIDE, TOKEN_ASSIGNMENT_WEIGHTAGE, VOCAB_SIZE
 
 
 def set_seed(seed: Optional[int] = 42):
@@ -43,7 +43,7 @@ def visualize_expert_usage(model, val_loader, device, epoch, save_path='./plots'
                 
                 learned_weights = F.softmax(model.router(x.mean(dim=1)), dim=-1)
                 token_weights = model.compute_token_expert_weights(inputs)
-                routing_weights = 0.5 * learned_weights + 0.5 * token_weights
+                routing_weights = LEARNED_WEIGHTS_WEIGHTAGE * learned_weights + TOKEN_ASSIGNMENT_WEIGHTAGE * token_weights
             else:
                 # For unguided model, get routing weights
                 x = model.embedding(inputs)

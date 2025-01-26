@@ -6,7 +6,7 @@ import torch
 from transformers import GPT2Config, GPT2Model
 
 from common import calculate_diversity_loss, create_expert_assignments, set_seed
-from constants import BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, LEARNED_WEIGHTS_WEIGHTAGE, TOKEN_ASSIGNMENT_WEIGHTAGE, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
+from constants import BALANCE_LOSS_WEIGHTAGE, BATCH_SIZE, CONTEXT_LENGTH, DATA_FRACTION, DIVERSITY_LOSS_WEIGHTAGE, LEARNED_WEIGHTS_WEIGHTAGE, ROUTING_LOSS_WEIGHTAGE, TOKEN_ASSIGNMENT_WEIGHTAGE, TOTAL_EPOCHS, VOCAB_SIZE, NUM_EXPERTS, HIDDEN_DIM, NUM_HEADS, NUM_LAYERS
 from dataset_loading import load_data
 from train_val import count_parameters, test_generation, train_model
 
@@ -40,7 +40,7 @@ class GPT2Expert(nn.Module):
         return outputs.last_hidden_state
 
 class UnGuidedGPT2MoE(nn.Module):
-    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.3,route_temp = 1.2):
+    def __init__(self, num_experts=NUM_EXPERTS,dropout=0.3,route_temp = 2.0):
         super().__init__()
         # Initialize GPT2 embedding layer
         config = GPT2Config(
@@ -110,9 +110,9 @@ class UnGuidedGPT2MoE(nn.Module):
             )
             diversity_loss = calculate_diversity_loss(expert_outputs)
             return logits, {
-                'balance_loss': balance_loss,
-                'diversity_loss': diversity_loss
-            }
+                    'balance_loss': balance_loss * BALANCE_LOSS_WEIGHTAGE,
+                    "diversity_loss":diversity_loss * DIVERSITY_LOSS_WEIGHTAGE
+                                }
             
         return logits
 
@@ -127,7 +127,6 @@ class GuidedGPT2MoE(nn.Module):
         )
         self.embedding = nn.Embedding(VOCAB_SIZE, HIDDEN_DIM)
         self.route_temp = nn.Parameter(torch.ones(1)*route_temp)
-        self.expert_assigner
         # Expert assignments based on token types
         self.expert_assignments = create_expert_assignments()
         
@@ -216,10 +215,9 @@ class GuidedGPT2MoE(nn.Module):
             )
             diversity_loss = calculate_diversity_loss(expert_outputs)
             
-            return logits, {
-                'routing_loss': routing_loss,
-                'diversity_loss': diversity_loss
-            }
+            return logits, {'routing_loss': routing_loss  * ROUTING_LOSS_WEIGHTAGE, 
+                            'diversity_loss':diversity_loss * DIVERSITY_LOSS_WEIGHTAGE
+                            }
             
         return logits
     
@@ -246,10 +244,10 @@ def main():
     print(f"\nTotal trainable parameters in Guided GPT 2 MoE: {count_parameters(guided_model):,}")
     train_model(guided_model, train_loader, val_loader,num_epochs=TOTAL_EPOCHS,viz_path=viz_save_path)
 
-    print("\nTesting Unguided Model Generation:")
+    print("\nTesting Unguided MoE GPT2 Generation:")
     test_generation(unguided_model)
     
-    print("\nTesting Guided Model Generation:")
+    print("\nTesting Guided MoE GPT2 Generation:")
     test_generation(guided_model)
     
 if __name__ == '__main__':

@@ -10,11 +10,11 @@ import torch
 
 
 from common import visualize_expert_usage
-from constants import CONTEXT_LENGTH, VOCAB_SIZE
+from constants import CONTEXT_LENGTH, TASK_LOSS_WEIGHTAGE, VOCAB_SIZE
 
 
 def train_model(model, train_loader, val_loader, num_epochs=10,viz_path=None, device='cuda'):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-2, weight_decay=0.001)  
+    optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.01)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, num_epochs)
     
     best_loss = float('inf')
@@ -55,10 +55,10 @@ def train_model(model, train_loader, val_loader, num_epochs=10,viz_path=None, de
                 epoch_aux_losses[loss_name] += loss_value.item()
             
             # Add auxiliary losses
-            total_batch_loss = main_loss + sum(aux_losses.values())
+            total_batch_loss = TASK_LOSS_WEIGHTAGE*main_loss + sum(aux_losses.values())
             
             total_batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             
             total_loss += total_batch_loss.item()
