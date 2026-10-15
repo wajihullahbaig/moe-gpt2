@@ -1,26 +1,45 @@
-# Python temporary files and folders
+# Byte-compiled / cache
 __pycache__/
 *.py[cod]
 *$py.class
-.Python
 *.so
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
 .env
-.venv
+.venv/
 env/
 venv/
 ENV/
+
+# Testing, type checking, linting
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# Model checkpoints
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors and OS (launch.json is shared on purpose)
+.idea/
+.vscode/*
+!.vscode/launch.json
+*.swp
+.DS_Store
+Thumbs.db
+
+# Experiment outputs
+runs/
+cache/
+wandb/
 *.pt
 *.pth
-
-# Documentation and plots
-*.pdf
-
-data/
-outputs/
-plots/
-plots_*/
+*.ckpt
+*.log

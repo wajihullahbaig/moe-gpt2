@@ -1,0 +1,75 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train · Transformer MoE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train.py",
+            "args": ["--arch", "transformer"],
+            "python": "C:\\Users\\Precision\\anaconda3\\envs\\gpt2\\python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Train · GPT-2 MoE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train.py",
+            "args": ["--arch", "gpt2"],
+            "python": "C:\\Users\\Precision\\anaconda3\\envs\\gpt2\\python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Resume · Transformer MoE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train.py",
+            "args": ["--arch", "transformer", "--resume", "${input:runDir}"],
+            "python": "C:\\Users\\Precision\\anaconda3\\envs\\gpt2\\python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Resume · GPT-2 MoE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train.py",
+            "args": ["--arch", "gpt2", "--resume", "${input:runDir}"],
+            "python": "C:\\Users\\Precision\\anaconda3\\envs\\gpt2\\python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Inference · interactive",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer.py",
+            "args": ["--run", "${input:runDir}", "--model", "${input:modelName}"],
+            "python": "C:\\Users\\Precision\\anaconda3\\envs\\gpt2\\python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "runDir",
+            "type": "promptString",
+            "description": "Run folder (e.g. runs/transformer_20261015_120000), or 'latest'",
+            "default": "latest"
+        },
+        {
+            "id": "modelName",
+            "type": "pickString",
+            "description": "Model inside the run",
+            "options": ["transformer-learned", "transformer-guided", "gpt2-learned", "gpt2-guided"],
+            "default": "transformer-guided"
+        }
+    ]
+}

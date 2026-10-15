@@ -1,0 +1,9 @@
+# Pinned to the tested `gpt2` conda env (Python 3.10, CUDA 11.8).
+# GPU build: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.5.1
+transformers==4.47.1
+datasets==3.2.0
+matplotlib==3.10.0
+seaborn==0.13.2
+numpy==1.26.4
+tqdm==4.67.1
