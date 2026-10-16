@@ -29,7 +29,7 @@ def plot_training_curves(histories, path):
 
 
 @torch.no_grad()
-def plot_expert_usage(model, loader, device, epoch, save_dir, tokenizer, top_tokens=30):
+def plot_expert_usage(model, loader, device, title, path, tokenizer, top_tokens=30):
     """Plot expert utilisation and token→expert routing on a loader; return usage and affinity per expert."""
     model.eval()
     num_experts = len(model.experts)
@@ -45,7 +45,8 @@ def plot_expert_usage(model, loader, device, epoch, save_dir, tokenizer, top_tok
     token_map = token_map.cpu().numpy()
     counts = token_map.sum(axis=1)
     share = token_map / np.maximum(counts[:, None], 1e-8)
-    assignment = vocab_partition(num_experts).numpy()
+    partition = getattr(model.router, 'token_to_expert', None)  # learned routers: compare against id ranges
+    assignment = (vocab_partition(num_experts) if partition is None else partition).cpu().numpy()
     seen = counts > 0
     usage = sequence_usage.mean(axis=0)
     affinity = np.array([share[seen & (assignment == e), e].mean() for e in range(num_experts)])
@@ -54,7 +55,7 @@ def plot_expert_usage(model, loader, device, epoch, save_dir, tokenizer, top_tok
     palette = sns.color_palette('deep', num_experts)
     experts = [f'E{e}' for e in range(num_experts)]
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f'{model.name} · epoch {epoch + 1}', fontsize=16, fontweight='bold')
+    fig.suptitle(title, fontsize=16, fontweight='bold')
 
     def bars(ax, values, title, ylabel):
         """Annotated per-expert bar chart with a uniform reference line."""
@@ -66,7 +67,7 @@ def plot_expert_usage(model, loader, device, epoch, save_dir, tokenizer, top_tok
         ax.legend(loc='upper right')
 
     bars(axes[0, 0], usage, 'Mean routing weight', 'Weight')
-    bars(axes[1, 1], affinity, 'Affinity to assigned vocabulary range', 'Mean routing share')
+    bars(axes[1, 1], affinity, 'Affinity to assigned tokens', 'Mean routing share')
 
     sns.violinplot(data=sequence_usage, ax=axes[0, 1], palette=palette, cut=0, inner='quartile')
     axes[0, 1].set(title='Per-sequence routing distribution', xticks=range(num_experts),
@@ -80,7 +81,7 @@ def plot_expert_usage(model, loader, device, epoch, save_dir, tokenizer, top_tok
     axes[1, 0].tick_params(axis='y', labelsize=8)
 
     fig.tight_layout()
-    os.makedirs(save_dir, exist_ok=True)
-    fig.savefig(os.path.join(save_dir, f'{model.name}_epoch{epoch + 1:03d}.png'), dpi=150, bbox_inches='tight')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     return {'usage': usage, 'affinity': affinity}

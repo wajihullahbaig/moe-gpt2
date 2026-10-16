@@ -12,6 +12,15 @@ def vocab_partition(num_experts):
     return torch.arange(VOCAB_SIZE) * num_experts // VOCAB_SIZE
 
 
+def frequency_partition(token_counts, num_experts):
+    """Map tokens, sorted by training frequency, to experts in bands carrying equal shares of the token mass."""
+    order = token_counts.argsort(descending=True)
+    mass = token_counts[order].double().cumsum(0) / token_counts.sum()
+    partition = torch.empty(VOCAB_SIZE, dtype=torch.long)
+    partition[order] = ((mass - 1e-9) * num_experts).long().clamp(0, num_experts - 1)
+    return partition
+
+
 class LearnedRouter(Router):
     """MLP over the causal prefix mean of embeddings, softened by a temperature; pushed towards balanced use."""
 
@@ -38,16 +47,17 @@ class LearnedRouter(Router):
         return Routing(weights, {'balance': BALANCE_LOSS_WEIGHT * balance})
 
 
-class VocabGuidedRouter(LearnedRouter):
-    """Learned router blended with a fixed vocabulary partition and trained to agree with it."""
+class PartitionGuidedRouter(LearnedRouter):
+    """Learned router blended with a fixed token→expert partition and trained to agree with it."""
 
-    def __init__(self, num_experts, temperature=GUIDED_ROUTE_TEMPERATURE, learned_share=GUIDED_LEARNED_SHARE):
+    def __init__(self, num_experts, token_to_expert, persistent=False, temperature=GUIDED_ROUTE_TEMPERATURE,
+                 learned_share=GUIDED_LEARNED_SHARE):
         super().__init__(num_experts, temperature)
         self.learned_share = learned_share
-        self.register_buffer('token_to_expert', vocab_partition(num_experts), persistent=False)
+        self.register_buffer('token_to_expert', token_to_expert, persistent=persistent)
 
     def forward(self, x, ids):
-        """Blend of learned and vocab-assigned weights plus the agreement loss."""
+        """Blend of learned and partition-assigned weights plus the agreement loss."""
         log_probs = self.log_probs(x)
         assignment = self.token_to_expert[ids]
         assigned = F.one_hot(assignment, log_probs.size(-1)).float()

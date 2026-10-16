@@ -15,7 +15,7 @@ import torch
 from transformers import GPT2TokenizerFast
 
 import config
-from config import BATCH_SIZE, DATA_FRACTION, RUNS_DIR, SEED
+from config import BATCH_SIZE, DATA_FRACTION, RUNS_DIR, SEED, VOCAB_SIZE
 from data import load_data
 from generation import log_samples
 from log_utils import Table, banner, log, setup_logger
@@ -60,15 +60,15 @@ def save_settings(run_dir, settings):
         json.dump(settings, f, indent=2)
 
 
-def train_and_test(arch, routing, loaders, device, run_dir, tokenizer):
+def train_and_test(arch, routing, loaders, device, run_dir, tokenizer, token_counts):
     """Train one model (resuming if possible), test it, sample from it and return its results row."""
     train_loader, val_loader, test_loader = loaders
     set_seed(SEED)
-    model = build_model(arch, routing).to(device)
+    model = build_model(arch, routing, token_counts).to(device)
     history_path = os.path.join(run_dir, f'{model.name}_history.json')
     finished_before = os.path.exists(history_path)
     banner(f'Training · {model.name} · {count_parameters(model):,} parameters')
-    history, best_val, seconds = train_model(model, train_loader, val_loader, device, run_dir, tokenizer)
+    history, best_val, seconds, best_stats = train_model(model, train_loader, val_loader, device, run_dir, tokenizer)
     test_ce = evaluate(model, test_loader, device)
     with open(history_path, 'w') as f:
         json.dump(history, f, indent=2)
@@ -76,7 +76,8 @@ def train_and_test(arch, routing, loaders, device, run_dir, tokenizer):
         with open(os.path.join(run_dir, f'{model.name}_samples.json'), 'w', encoding='utf-8') as f:
             json.dump(log_samples(model, tokenizer, device), f, indent=2, ensure_ascii=False)
     return {'model': model.name, 'params': count_parameters(model), 'best_val_ce': best_val,
-            'test_ce': test_ce, 'test_ppl': math.exp(test_ce), 'minutes': seconds / 60}
+            'test_ce': test_ce, 'test_ppl': math.exp(test_ce), 'minutes': seconds / 60,
+            'epochs': len(history), **best_stats}
 
 
 def log_results(results, run_dir):
@@ -116,7 +117,9 @@ def main():
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     loaders = load_data(tokenizer, BATCH_SIZE, DATA_FRACTION)
 
-    results = [train_and_test(args.arch, routing, loaders, device, run_dir, tokenizer) for routing in args.routing]
+    token_counts = torch.bincount(loaders[0].dataset.tokens, minlength=VOCAB_SIZE)
+    results = [train_and_test(args.arch, routing, loaders, device, run_dir, tokenizer, token_counts)
+               for routing in args.routing]
     log_results(results, run_dir)
 
 

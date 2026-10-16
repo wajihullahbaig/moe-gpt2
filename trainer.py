@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from config import EPOCHS, GRAD_CLIP, LEARNING_RATE, PLOT_EVERY, TASK_LOSS_WEIGHT, WEIGHT_DECAY
+from config import EPOCHS, GRAD_CLIP, LEARNING_RATE, PATIENCE, PLOT_EVERY, TASK_LOSS_WEIGHT, WEIGHT_DECAY
 from generation import log_preview
 from log_utils import Table, log
 from plotting import plot_expert_usage
@@ -93,6 +93,12 @@ def _cosine_lr(epoch, epochs):
     return LEARNING_RATE * 0.5 * (1 + math.cos(math.pi * epoch / epochs))
 
 
+def _stale_epochs(history):
+    """Epochs since the best validation CE (0 when the latest epoch is the best)."""
+    best = min(range(len(history)), key=lambda i: history[i]['val_ce'], default=0)
+    return max(0, len(history) - 1 - best)
+
+
 def _load_checkpoint(path, model, optimizer, epochs):
     """Restore a resumable checkpoint; return (start epoch, best val CE, history, seconds)."""
     if not os.path.exists(path):
@@ -121,7 +127,7 @@ def _epoch_table(aux_names, num_experts):
 
 
 def train_model(model, train_loader, val_loader, device, run_dir, tokenizer, epochs=EPOCHS):
-    """Train (resuming if run_dir holds a checkpoint) and reload the best weights; return (history, best val CE, seconds)."""
+    """Train (resuming, early-stopping), reload the best weights; return (history, best val CE, seconds, best stats)."""
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     best_path = os.path.join(run_dir, f'{model.name}.pth')
     last_path = os.path.join(run_dir, f'{model.name}_last.pth')
@@ -129,6 +135,9 @@ def train_model(model, train_loader, val_loader, device, run_dir, tokenizer, epo
 
     table = None
     for epoch in range(start_epoch, epochs):
+        if _stale_epochs(history) >= PATIENCE:
+            log.info(f'Early stop: no val improvement for {PATIENCE} epochs (best val ce {best_val:.4f})')
+            break
         start = time.perf_counter()
         lr = _cosine_lr(epoch, epochs)
         for group in optimizer.param_groups:
@@ -138,7 +147,8 @@ def train_model(model, train_loader, val_loader, device, run_dir, tokenizer, epo
         val_ce = evaluate(model, val_loader, device)
         stats = None
         if epoch % PLOT_EVERY == 0 or epoch == epochs - 1:
-            stats = plot_expert_usage(model, val_loader, device, epoch, os.path.join(run_dir, 'plots'), tokenizer)
+            stats = plot_expert_usage(model, val_loader, device, f'{model.name} · epoch {epoch + 1}',
+                                      os.path.join(run_dir, 'plots', f'{model.name}_epoch{epoch + 1:03d}.png'), tokenizer)
 
         is_best = val_ce < best_val
         if is_best:
@@ -161,4 +171,6 @@ def train_model(model, train_loader, val_loader, device, run_dir, tokenizer, epo
 
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     log.info(f'Loaded best weights (val ce {best_val:.4f}) from {best_path}')
-    return history, best_val, seconds
+    best_stats = plot_expert_usage(model, val_loader, device, f'{model.name} · best checkpoint',
+                                   os.path.join(run_dir, 'plots', f'{model.name}_best.png'), tokenizer)
+    return history, best_val, seconds, {k: v.tolist() for k, v in best_stats.items()}

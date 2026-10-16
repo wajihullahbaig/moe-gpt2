@@ -10,8 +10,6 @@ import shutil
 
 from plotting import plot_training_curves
 
-DOCS_DIR = 'docs'
-
 
 def load_json(path):
     """Read a UTF-8 JSON file."""
@@ -19,7 +17,7 @@ def load_json(path):
         return json.load(f)
 
 
-def collect(run_dirs):
+def collect(run_dirs, out_dir):
     """Merge results, histories and samples of every model across the given runs."""
     results, histories, samples = [], {}, {}
     for run_dir in run_dirs:
@@ -28,18 +26,19 @@ def collect(run_dirs):
             results.append(row)
             histories[name] = load_json(os.path.join(run_dir, f'{name}_history.json'))
             samples[name] = load_json(os.path.join(run_dir, f'{name}_samples.json'))
-            latest_plot = sorted(glob.glob(os.path.join(run_dir, 'plots', f'{name}_epoch*.png')))[-1]
-            shutil.copy(latest_plot, os.path.join(DOCS_DIR, f'{name}_experts.png'))
+            plots = glob.glob(os.path.join(run_dir, 'plots', f'{name}_best.png'))
+            plots = plots or sorted(glob.glob(os.path.join(run_dir, 'plots', f'{name}_epoch*.png')))  # older runs
+            shutil.copy(plots[-1], os.path.join(out_dir, f'{name}_experts.png'))
     return results, histories, samples
 
 
 def results_table(results, histories):
     """Markdown metrics table, best test perplexity in bold."""
     best = min(r['test_ppl'] for r in results)
-    lines = ['| Model | Params | Epochs | Best val CE | Test CE | Test PPL | Final usage | Final affinity | Minutes |',
+    lines = ['| Model | Params | Epochs | Best val CE | Test CE | Test PPL | Usage | Affinity | Minutes |',
              '|---|---:|---:|---:|---:|---:|---:|---:|---:|']
     for r in results:
-        last = next(h for h in reversed(histories[r['model']]) if 'usage' in h)
+        last = r if 'usage' in r else next(h for h in reversed(histories[r['model']]) if 'usage' in h)
         ppl = f"**{r['test_ppl']:.1f}**" if r['test_ppl'] == best else f"{r['test_ppl']:.1f}"
         lines.append(f"| `{r['model']}` | {r['params']:,} | {len(histories[r['model']])} | {r['best_val_ce']:.4f} "
                      f"| {r['test_ce']:.4f} | {ppl} | {'/'.join(f'{u:.2f}' for u in last['usage'])} "
@@ -60,17 +59,18 @@ def samples_tables(samples, temperature, max_words=40):
 
 
 def main():
-    """Write docs/ figures and docs/results.md for the given run folders."""
+    """Write figures and results.md for the given run folders into --out."""
     parser = argparse.ArgumentParser(description='Build README results from finished runs.')
     parser.add_argument('runs', nargs='+', help='run folders to include')
     parser.add_argument('--temperature', default='0.7', help='sampling temperature shown in the samples tables')
+    parser.add_argument('--out', default='docs', help='output folder for figures and results.md')
     args = parser.parse_args()
-    os.makedirs(DOCS_DIR, exist_ok=True)
+    os.makedirs(args.out, exist_ok=True)
 
-    results, histories, samples = collect(args.runs)
-    plot_training_curves(histories, os.path.join(DOCS_DIR, 'training_curves.png'))
+    results, histories, samples = collect(args.runs, args.out)
+    plot_training_curves(histories, os.path.join(args.out, 'training_curves.png'))
     markdown = f"{results_table(results, histories)}\n\n{samples_tables(samples, args.temperature)}\n"
-    with open(os.path.join(DOCS_DIR, 'results.md'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(args.out, 'results.md'), 'w', encoding='utf-8') as f:
         f.write(markdown)
     print(markdown)
 
