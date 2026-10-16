@@ -68,7 +68,7 @@
             "id": "modelName",
             "type": "pickString",
             "description": "Model inside the run",
-            "options": ["transformer-learned", "transformer-guided", "gpt2-learned", "gpt2-guided"],
+            "options": ["transformer-learned", "transformer-guided", "transformer-freq", "gpt2-learned", "gpt2-guided", "gpt2-freq"],
             "default": "transformer-guided"
         }
     ]
